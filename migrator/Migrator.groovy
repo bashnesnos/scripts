@@ -4,7 +4,7 @@ import java.util.regex.Matcher
 /**
 * A simple and light-weight builder-like class to help with migration sources IO.
 * Provides an ordered source transformation (in insertion order), plain line, regex-filtered line processing.
-* Assumed to be used in command-line, so be aware of <code>System.exit(1)</code>
+* Throws TerminatedException if there is a problem 
 *
 * author: Alexander Semelit
 */
@@ -59,19 +59,28 @@ class Migrator {
 	}
 
 	public void terminate(String message) {
-	    printTimePassed(message)
-	    System.exit(1)    
+	    printTimePassed("")
+	    throw new TerminatedException(message)    
 	}
 
-	public File getFile(String filename, boolean merge) {
+	public File getFile(String filename) {
+		return getFile(filename, false)
+	}
+
+
+	public File getFile(String filename, boolean deleteIfExists) {
 	    File file = new File(localDirPath, filename) //creates new files locally, which is good
-	    if (!merge && file.exists()) {
+	    if (deleteIfExists && file.exists()) {
 	        file.delete()
 	    }
 	    return file
 	}
 
 	public String findFile(String filename) {
+		return findFile(filename, false)
+	}
+	
+	public String findFile(String filename, boolean shouldExist) {
 		LOGGER.info "Looking for $filename in $sourceDirPath"
 	    def results = new File(sourceDirPath).listFiles({dir, name -> name ==~ "$filename"} as FilenameFilter)
 		
@@ -85,13 +94,24 @@ class Migrator {
 				return results[0].getCanonicalPath()
 			}
 	    }
-		terminate "Error getting file for /$filename/: $results"
+		
+		if (shouldExist) {
+			terminate "Error getting file for /$filename/: $results"
+		}
+		else {
+			LOGGER.debug "File not found or there is more than one matching /$filename/: $results"
+			return null
+		}
 	}
 
 	public String transform(String infile, String outfile, String pattern, Closure transformer, boolean merge) {
-	    LOGGER.info "Transforming $infile to $outfile"
-	    def out_file = getFile(outfile, merge)
-	    def writer = out_file.newWriter(true)
+	    LOGGER.info "Transforming $infile ${outfile != null ? 'to ' + outfile : ''}"
+		
+		def writer = new NoOpWriter()
+		if (outfile != null) {
+		    writer = getFile(outfile, !merge).newWriter(true)
+		}
+		
 	    long i = 0;
 	    def printOrReturn = { newLine ->
 	        if (newLine != null) {
@@ -152,14 +172,17 @@ class Migrator {
 		        terminate "Migration interrupted."
 		    }
 
-		    String realFile = findFile(source.inputFile)
-		    String transformedInput = source.outputFile == null ? realFile : transform(realFile
+		    String realFile = findFile(source.inputFile, true)
+		    String transformedInput = source.onMatchClosure == null ? realFile : transform(realFile
 		        ,source.outputFile
 		        ,source.linePattern
 		        ,source.onMatchClosure
 		        ,merge
 		    )
-		    printTimePassed("Transform of $realFile finished.")
+			
+			if (source.onMatchClosure != null) {
+				printTimePassed("Transform of $realFile finished.")
+			}
 		    
 		    merge = source.tableName == null
 		    if (!merge) {
@@ -184,6 +207,16 @@ class Migrator {
 		}
 	}
 
+	private class NoOpWriter {
+		void println(def obj) {
+			//ignoring
+		}
+		
+		void close() {
+			//ignoring
+		}
+	}
+	
 	private class StdOutLogger {
 		void info(String msg) {
 			println "INFO: $msg"
@@ -245,5 +278,11 @@ linePattern: $linePattern
 onMatch: ${onMatchClosure != null ? 'specified' : 'not specified'}
 tableName: $tableName
 doLast: ${doLastClosure != null ? 'specified' : 'not specified'}"""
+	}
+}
+
+class TerminatedException extends RuntimeException {
+	public TerminatedException(String msg) {
+		super(msg)
 	}
 }
