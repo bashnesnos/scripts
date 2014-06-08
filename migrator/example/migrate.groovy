@@ -163,13 +163,14 @@ migrator.with {
     source { //grabbing code-set B
         inputFile "(?i)another_code_tab.*"
         outputFile "Code.bcp"
+        appendOutput true
         onMatch {line -> line} //keeping the same
         doLast {
             new File(outputFile).append("?|Code type unknown (migration)|\r\n") //adding new type, just an example
         }
     }
 
-    source { //uploading merged Code.bcp
+    source { //uploading merged Code.bcp here, because we needed to add additional line in the of code-set B grabbing
         inputFile "Code.bcp"
         tableName "[dbo].[Code]"
     }
