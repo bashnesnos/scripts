@@ -1,9 +1,10 @@
+package nz.govt.moh.hce
 import java.util.regex.Pattern
 import java.util.regex.Matcher
 
 /**
 * A simple and light-weight builder-like class to help with migration sources IO.
-* Provides an ordered source transformation (in insertion order), plain line, regex-filtered line processing.
+* Provides an ordered source transformation (in insertion order), plain/regex-filtered line processing.
 * Throws TerminatedException if there is a problem 
 *
 * author: Alexander Semelit
@@ -14,6 +15,7 @@ class Migrator {
 	double started = new Date().getTime()
 	String localDirPath = "."
 	String sourceDirPath = "."
+	String separator
 	Writer skippedLinesFileWriter
 	
 	public Migrator() {
@@ -29,18 +31,18 @@ class Migrator {
 		}
 
 		if (params != null) {
-			if (params.localDirPath != null) {
-				this.localDirPath = params.localDirPath
-				LOGGER.info "Local dir set to: $localDirPath"
-			}
-
-			if (sourceDirPath != null) {
+			if (params.sourceDirPath != null) {
 				this.sourceDirPath = params.sourceDirPath
 				LOGGER.info "Source dir set to: $sourceDirPath"
 			}
 
 			if (params.skippingAllowed != null && params.skippingAllowed) {
-			    skippedLinesFileWriter = getFile('skippedTransform.log', false).newWriter()
+			    skippedLinesFileWriter = new File('skippedTransform.log').newWriter()
+			}
+
+			if (params.separator != null) {
+				this.separator = params.separator
+				LOGGER.info "Column separator set to $separator"
 			}
 		}
 	}
@@ -61,19 +63,6 @@ class Migrator {
 	public void terminate(String message) {
 	    printTimePassed("")
 	    throw new TerminatedException(message)    
-	}
-
-	public File getFile(String filename) {
-		return getFile(filename, false)
-	}
-
-
-	public File getFile(String filename, boolean deleteIfExists) {
-	    File file = new File(localDirPath, filename) //creates new files locally, which is good
-	    if (deleteIfExists && file.exists()) {
-	        file.delete()
-	    }
-	    return file
 	}
 
 	public String findFile(String filename) {
@@ -104,12 +93,12 @@ class Migrator {
 		}
 	}
 
-	public String transform(String infile, String outfile, String pattern, Closure transformer, boolean merge) {
+	public String transform(String infile, String outfile, Pattern pattern, Closure onMatchClosure, Closure onInvalidClosure, boolean append) {
 	    LOGGER.info "Transforming $infile ${outfile != null ? 'to ' + outfile : ''}"
 		
 		def writer = new NoOpWriter()
 		if (outfile != null) {
-		    writer = getFile(outfile, !merge).newWriter(true)
+		    writer = new File(outfile).newWriter(append)
 		}
 		
 	    long i = 0;
@@ -122,24 +111,40 @@ class Migrator {
 	        }
 	    }
 	    
+	    boolean skippedLinesFileNamePrinted = false
+
 	    if (pattern != null) {
-	        def compiled = Pattern.compile(pattern)
 	        new File(infile).eachLine{line ->
-	            def mtchr = compiled.matcher(line)
+	            Matcher mtchr = pattern.matcher(line)
 	            if (mtchr.find()) {
-	            	def transformerParams = transformer.getParameterTypes()
-	            	if (transformerParams.length == 1 && Matcher.class.isAssignableFrom(transformerParams[0])) {
-	                	printOrReturn transformer(mtchr)
+	            	def onMatchClosureParams = onMatchClosure.getParameterTypes()
+	            	if (onMatchClosureParams.length == 1 && Matcher.class.isAssignableFrom(onMatchClosureParams[0])) {
+	                	printOrReturn onMatchClosure(mtchr)
 	            	}
 	            	else {
-	            		printOrReturn transformer((1..mtchr.groupCount()).collect {idx -> mtchr.group(idx)})
+	            		if (mtchr.groupCount() > 1) {
+	            			printOrReturn onMatchClosure((1..mtchr.groupCount()).collect {idx -> mtchr.group(idx)} as List<String>)
+	            		}
+	            		else if (mtchr.groupCount() == 1) {
+	            			printOrReturn onMatchClosure(mtchr.group(1))
+	            		}
+	            		else {
+	            			printOrReturn onMatchClosure(line)
+	            		}
 	            	}
 	                i++
 	            }
 	            else {
-	                if (skippedLinesFileWriter != null) {
-	                    skippedLinesFileWriter.println "$infile\n$line"
-	                }
+	            	if (onInvalidClosure != null) {
+	            		onInvalidClosure.call(infile, i, mtchr)
+	            	}	 
+	                else if (skippedLinesFileWriter != null) {
+	                	if (!skippedLinesFileNamePrinted) {
+	                		skippedLinesFileWriter.println "$infile"
+	                		skippedLinesFileNamePrinted = true
+	                	}
+	                    skippedLinesFileWriter.println "$i : $line"
+	                }               
 	                else {
 	                    LOGGER.error "Incorrect file format\n/${pattern.toString()}/\n$line"
 	                    terminate "Processing $infile interrupted."
@@ -147,9 +152,9 @@ class Migrator {
 	            }
 	        }
 	    }
-	    else if (transformer != null) {
-	        new File(infile).eachLine{line ->
-	            printOrReturn transformer(line)
+	    else if (onMatchClosure != null) {
+	        new File(infile).eachLine{ line ->
+	            printOrReturn onMatchClosure(separator != null ? line.tokenize(separator) : line)
 	            i++
 	        }
 	    }
@@ -164,8 +169,19 @@ class Migrator {
 	    return outfile
 	}
 
-	public void upload(Closure uploadClosure) {
-		boolean merge = false
+	public void uploadAll(Closure uploadAllClosure) {
+		process(null, uploadAllClosure)
+	}
+
+	public void uploadEach(Closure uploadEachClosure) {
+		process(uploadEachClosure, null)
+	}
+
+	public void process() {
+		process(null, null)
+	}
+
+	public void process(Closure uploadEachClosure, Closure uploadAllClosure) {
 		sources.each { source ->
 		    if (source.inputFile == null) {
 		        LOGGER.error "Source should have an inputFile!\n$source"
@@ -177,22 +193,24 @@ class Migrator {
 		        ,source.outputFile
 		        ,source.linePattern
 		        ,source.onMatchClosure
-		        ,merge
+		        ,source.onInvalidClosure
+		        ,source.appendOutput
 		    )
 			
 			if (source.onMatchClosure != null) {
 				printTimePassed("Transform of $realFile finished.")
 			}
 		    
-		    merge = source.tableName == null
-		    if (!merge) {
-		        uploadClosure.call(source.tableName
-		            ,transformedInput
-		        )
-		    }
-		    else {
-		        LOGGER.info "File will be merged"
-		    }
+		    if (uploadEachClosure != null) {
+			    if (source.tableName != null) {
+			        uploadEachClosure.call(source.tableName
+			            ,transformedInput
+			        )
+			    }
+			    else {
+			        LOGGER.info "Skipping upload"
+			    }
+			}
 
 		    Closure callback = source.doLastClosure
 		    if (callback != null) {
@@ -205,6 +223,11 @@ class Migrator {
 		if (skippedLinesFileWriter != null) {
 			skippedLinesFileWriter.close()
 		}
+
+		if (uploadAllClosure != null) {
+			uploadAllClosure.call(sources)
+		}
+
 	}
 
 	private class NoOpWriter {
@@ -240,10 +263,16 @@ class Migrator {
 class SourceDescriptor {
 	String inputFile
 	String outputFile
-	String linePattern
+	Pattern linePattern
+	boolean appendOutput = false
 	Closure onMatchClosure
+	Closure onInvalidClosure
 	String tableName
 	Closure doLastClosure
+
+	public void appendOutput(boolean appendOutput) {
+		this.appendOutput = appendOutput
+	}
 	
 	public void inputFile(String inputFile) {
 		this.inputFile = inputFile
@@ -253,13 +282,25 @@ class SourceDescriptor {
 		this.outputFile = outputFile
 	}
 	
-	public void linePattern(String linePattern) {
-		this.linePattern = linePattern
+	public void linePattern(def linePattern) {
+		switch (linePattern) {
+			case Pattern:
+				this.linePattern = linePattern
+				break
+			default:
+				this.linePattern = Pattern.compile(linePattern)
+		}
+		
 	}
 
 	public void tableName(String tableName) {
 		this.tableName = tableName
 	}	
+
+	public void onInvalid(Closure onInvalidClosure) {
+		onInvalidClosure.setDelegate(this)
+		this.onInvalidClosure = onInvalidClosure
+	}
 	
 	public void onMatch(Closure onMatchClosure) {
 		onMatchClosure.setDelegate(this)
@@ -274,7 +315,8 @@ class SourceDescriptor {
 	public String toString() {
 		return """inputFile: $inputFile
 outputFile: $outputFile
-linePattern: $linePattern
+appendOutput: $appendOutput
+linePattern: ${linePattern != null ? linePattern.toString() : linePattern}
 onMatch: ${onMatchClosure != null ? 'specified' : 'not specified'}
 tableName: $tableName
 doLast: ${doLastClosure != null ? 'specified' : 'not specified'}"""
