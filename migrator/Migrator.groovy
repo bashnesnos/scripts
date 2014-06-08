@@ -135,16 +135,17 @@ class Migrator {
 	                i++
 	            }
 	            else {
-	            	if (onInvalidClosure != null) {
-	            		onInvalidClosure.call(infile, i, mtchr)
-	            	}	 
-	                else if (skippedLinesFileWriter != null) {
+	            	if (skippedLinesFileWriter != null) {
 	                	if (!skippedLinesFileNamePrinted) {
 	                		skippedLinesFileWriter.println "$infile"
 	                		skippedLinesFileNamePrinted = true
 	                	}
 	                    skippedLinesFileWriter.println "$i : $line"
-	                }               
+	                }    
+	            	
+	            	if (onInvalidClosure != null) {
+	            		onInvalidClosure.call(infile, i, mtchr)
+	            	}	            
 	                else {
 	                    LOGGER.error "Incorrect file format\n/${pattern.toString()}/\n$line"
 	                    terminate "Processing $infile interrupted."
